@@ -1,0 +1,349 @@
+local function doesLevelMatch( target, criteria, noAttr )
+    local doesTypeMatch = criteria.ambiguous and Titanium.typeOf( target, criteria.type ) or target.__type == criteria.type
+    if ( criteria.type == "*" or not criteria.type or doesTypeMatch ) and noAttr then
+        return true
+    end
+
+    if ( criteria.type and not doesTypeMatch and criteria.type ~= "*" ) or ( criteria.id and target.id ~= criteria.id ) or ( criteria.classes and not target:hasClass( criteria.classes ) ) then
+        return false
+    end
+
+    return true
+end
+
+local function doParentsMatch( parents, level, criteria, noAttr )
+    for i = level, #parents do
+        local parent = parents[ i ]
+        if doesLevelMatch( parent, criteria, noAttr ) then
+            return true, i
+        end
+    end
+
+    return false
+end
+
+local function doesMatchQuery( node, queryString, noAttr )
+    -- Get a parsed version of the query
+    local query = QueryParser( queryString ).query[ 1 ]
+
+    -- Collate the nodes parents once here
+    local last, levels = node, {}
+    while true do
+        local p = last.parent
+        if p then
+            levels[ #levels + 1 ] = p
+            last = p
+        else break end
+    end
+
+
+    -- If the last part of the query (the node part) does not match the node, return false
+    if not doesLevelMatch( node, query[ #query ], noAttr ) then
+        return false
+    end
+
+
+    -- Work backwards from the end of the query (-1), to the beginning.
+    local parentLevel = 1
+    for i = #query - 1, 1, -1 do
+        local part = query[ i ]
+        if part.direct then
+            if doesLevelMatch( levels[ parentLevel ], part, noAttr ) then
+                parentLevel = parentLevel + 1
+            else return false end
+        else
+            local success, levels = doParentsMatch( levels, parentLevel, part, noAttr )
+            if success then
+                parentLevel = parentLevel + levels
+            else return false end
+        end
+    end
+
+    return true
+end
+
+--[[
+    The MThemeable mixin facilitates the use of themes on objects.
+    It allows properties to be registered allowing the object to monitor property changes and apply them correctly.
+
+    The mixin stores all properties set directly on the object in `mainValues`. These values are prioritized over values from themes unless the theme rule is designated as 'important'.
+
+    This mixin no longer handles property links as this functionality has been replaced by a more robust system 'MPropertyManager'.
+]]
+
+abstract class MThemeable {
+    isUpdating = false;
+    hooked = false;
+
+    properties = {};
+    classes = {};
+    applicableRules = {};
+    rules = {};
+
+    mainValues = {};
+    defaultValues = {};
+}
+
+--[[
+    @instance
+    @desc Registers the properties provided. These properties are monitored for changes.
+    @param <string - property>, ...
+]]
+function MThemeable:register( ... )
+    if self.hooked then return error "Cannot register new properties while hooked. Unhook the theme handler before registering new properties" end
+
+    local args = { ... }
+    for i = 1, #args do
+        self.properties[ args[ i ] ] = true
+    end
+end
+
+--[[
+    @instance
+    @desc Unregisters properties provided
+    @param <string - property>, ...
+]]
+function MThemeable:unregister( ... )
+    if self.hooked then return error "Cannot unregister properties while hooked. Unhook the theme handler before unregistering properties" end
+
+    local args = { ... }
+    for i = 1, #args do
+        self.properties[ args[ i ] ] = nil
+    end
+end
+
+--[[
+    @instance
+    @desc Hooks into the instance by creating watch instructions that inform the mixin of property changes.
+]]
+function MThemeable:hook()
+    if self.hooked then return error "Failed to hook theme handler. Already hooked" end
+
+    for property in pairs( self.properties ) do
+        self:watchProperty( property, function( _, __, value )
+            if self.isUpdating then return end
+
+            self.mainValues[ property ] = value
+            return self:fetchPropertyValue( property )
+        end, "THEME_HOOK_" .. self.__ID )
+
+        self[ self.__resolved[ property ] and "mainValues" or "defaultValues" ][ property ] = self[ property ]
+    end
+
+    self:on( "dynamic-instance-set", function( self, dynamicInstance )
+        if not self.isUpdating and dynamicInstance.property then
+            self.mainValues[ dynamicInstance.property ] = dynamicInstance
+        end
+    end )
+
+    self:on( "dynamic-instance-unset", function( self, property, dynamicInstance )
+        if not self.isUpdating and self.mainValues[ property ] == dynamicInstance then
+            self.mainValues[ property ] = nil
+        end
+    end )
+
+
+    self.hooked = true
+end
+
+--[[
+    @instance
+    @desc Removes the watch instructions originating from this mixin (identified by 'THEME_HOOK_<ID>' name)
+]]
+function MThemeable:unhook()
+    if not self.hooked then return error "Failed to unhook theme handler. Already unhooked" end
+    self:unwatchProperty( "*", "THEME_HOOK_" .. self.__ID )
+
+    self:off "dynamic-instance-set"
+    self:off "dynamic-instance-unset"
+
+    self.hooked = false
+end
+
+--[[
+    @instance
+    @desc Returns the value for the property given. The value is found by checking themes for property values (taking into account 'important' rules). If no rule is found in the themes, the
+          value from 'mainValues' is returned instead.
+    @param <string - property>
+    @return <any - value>, <table - rule>
+]]
+function MThemeable:fetchPropertyValue( property )
+    local newValue = self.mainValues[ property ]
+    local requireImportant = newValue ~= nil
+
+    local rules, r, usedRule = self.applicableRules
+    for i = 1, #rules do
+        r = rules[ i ]
+        if r.property == property and ( not requireImportant or r.important ) then
+            newValue = r.value
+            usedRule = r
+
+            if r.important then requireImportant = true end
+        end
+    end
+
+    return newValue, usedRule
+end
+
+--[[
+    @instance
+    @desc Fetches the value from the application by checking themes for valid rules. If a theme value is found it is applied directly (this does trigger the setter)
+    @param <string - property>
+]]
+function MThemeable:updateProperty( property )
+    if not self.properties[ property ] then
+        return error( "Failed to update property '"..tostring( property ).."'. Property not registered" )
+    end
+
+    local new, rule = self:fetchPropertyValue( property )
+    self.isUpdating = true
+    if new ~= nil then
+        if Titanium.typeOf( new, "DynamicValue", true ) then
+            self:setDynamicValue( new, true )
+        elseif rule and rule.isDynamic then
+            self:setDynamicValue( DynamicValue( self, property, new ), true )
+        else
+            self[ property ] = new
+        end
+    else
+        self[ property ] = self.defaultValues[ property ]
+    end
+
+    self.isUpdating = false
+end
+
+--[[
+    @instance
+    @desc Stores rules that can be applied to this node (excluding class and ids) in 'applicableRules'. These rules are then filtered by id and classes into 'applicableRules'.
+
+          If 'preserveOld', the old rules will NOT be cleared.
+    @param [boolean - preserveOld]
+]]
+function MThemeable:retrieveThemes( preserveOld )
+    if not preserveOld then self.rules = {} end
+    if not self.application then return false end
+
+    local types, aliases
+
+    local selfRules, targetRules = self.rules, self.application.rules
+
+    if not targetRules then return end
+    for _, value in pairs { targetRules.ANY, targetRules[ self.__type ] } do
+        local q = 1
+        for query, properties in pairs( value ) do
+            if doesMatchQuery( self, query, true ) then
+                if not selfRules[ query ] then selfRules[ query ] = {} end
+                local rules, prop = selfRules[ query ]
+                for i = 1, #properties do
+                    prop = properties[ i ]
+
+                    if prop.computeType then
+                        if not aliases then
+                            local reg = Titanium.getClass( self.__type ).getRegistry()
+                            aliases = reg.alias
+
+                            local constructor = reg.constructor
+                            if constructor then
+                                types = constructor.argumentTypes or {}
+                            else types = {} end
+                        end
+
+                        rules[ #rules + 1 ] = { property = prop.property, important = prop.important, value = XMLParser.convertArgType( prop.value, types[ aliases[ prop.property ] or prop.property ] ) }
+                    else
+                        rules[ #rules + 1 ] = prop
+                    end
+                end
+            end
+        end
+    end
+
+    self:filterThemes()
+
+    local nodes = self.nodes
+    if nodes then
+        for i = 1, #nodes do
+            nodes[ i ]:retrieveThemes( preserveOld )
+        end
+    end
+end
+
+--[[
+    @instance
+    @desc Checks each owned rule, only applying the rules that have queries that match exactly (owned rules are not dependent on classes/ids, where as applicableRules are)
+]]
+function MThemeable:filterThemes()
+    local aRules = {}
+    for query, properties in pairs( self.rules ) do
+        if doesMatchQuery( self, query ) then
+            -- The query is an exact match, add the properties to 'applicableRules', where the node will fetch it's properties
+            for i = 1, #properties do aRules[ #aRules + 1 ] = properties[ i ] end
+        end
+    end
+
+    self.applicableRules = aRules
+    self:updateProperties()
+end
+
+--[[
+    @instance
+    @desc Updates each registered property
+]]
+function MThemeable:updateProperties()
+    for property in pairs( self.properties ) do
+        self:updateProperty( property )
+    end
+end
+
+--[[
+    @instance
+    @desc Adds class 'class' and updated TML properties
+    @param <string - class>
+]]
+function MThemeable:addClass( class )
+    self.classes[ class ] = true
+    self:filterThemes()
+end
+
+--[[
+    @instance
+    @desc Removes class 'class' and updated TML properties
+    @param <string - class>
+]]
+function MThemeable:removeClass( class )
+    self.classes[ class ] = nil
+    self:filterThemes()
+end
+
+--[[
+    @instance
+    @desc Shortcut method to set class if 'has' is truthy or remove it otherwise (updates properties too)
+    @param <string - class>, [var - has]
+]]
+function MThemeable:setClass( class, has )
+    self.classes[ class ] = has and true or nil
+    self:filterThemes()
+end
+
+--[[
+    @instance
+    @desc Returns true if:
+          - Param passed is a table and all values inside the table are set as classes on this object
+          - Param is string and this object has that class
+    @param <string|table - class>
+    @return <boolean - has>
+]]
+function MThemeable:hasClass( t )
+    if type( t ) == "string" then
+        return self.classes[ t ]
+    elseif type( t ) == "table" then
+        for i = 1, #t do
+            if not self.classes[ t[ i ] ] then
+                return false
+            end
+        end
+
+        return true
+    else
+        return error("Invalid target '"..tostring( t ).."' for class check")
+    end
+end

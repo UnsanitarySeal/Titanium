@@ -1,0 +1,164 @@
+local string_sub = string.sub
+
+--[[
+    The EditableTextContainer is a slightly more advanced version of TextContainer, allowing for changes to be made to the displayed text
+]]
+
+class EditableTextContainer extends TextContainer {
+    allowKey = true,
+    allowChar = true
+}
+
+--[[
+    @instance
+    @desc Calls the super 'wrapText' with a reduced width (by one) so that space is left for the caret
+    @param <number - width>
+]]
+function EditableTextContainer:wrapText( width )
+    self.super:wrapText( width - 1 )
+end
+
+--[[
+    @instance
+    @desc Inserts the content given, using the provided offsets where provided.
+
+          The 'offsetPost' (def. 1) will be added to the position when appending the remainder of the string
+
+          'offsetPre' (def. 0) is subtracted from the position when creating the section to concatenate to the start of the value. If this is >1, content
+          will be lost (ie: backspace).
+
+          If there is a selection when this method is called, the selected content will be removed.
+
+          The position will be increased by the length of the value provided.
+    @param <string - value>, [number - offsetPost], [number - offsetPre]
+]]
+function EditableTextContainer:insertContent( value, offsetPost, offsetPre )
+    if self.selection then self:removeContent() end
+
+    local text = self.text
+    self.text = string_sub( text, 1, self.position - ( offsetPre or 0 ) ) .. value .. string_sub( text, self.position + ( offsetPost or 1 ) )
+    self.position = self.position + #value
+end
+
+--[[
+    @instance
+    @desc Removes the content at the position (or if a selection is made, the selected text). The preAmount (def. 1) specifies the content
+          to be kept BEFORE the selection/position. Hence, the higher the number the more content is lost.
+
+          Likewise, 'postAmount' (def. 1) is added to the remainder, the higher the number the more content AFTER the selection/position is lost
+    @param [number - preAmount], [number - postAmount]
+]]
+function EditableTextContainer:removeContent( preAmount, postAmount )
+    preAmount = preAmount or 1
+    local text = self.text
+    if self.selection then
+        self.text = string_sub( text, 1, math.min( self.selection, self.position ) - preAmount ) .. string_sub( text, math.max( self.selection, self.position ) + ( postAmount or 1 ) )
+        self.position = math.min( self.position, self.selection ) - 1
+
+        self.selection = false
+    else
+        if self.position == 0 and preAmount > 0 then return end
+
+        self.text = string_sub( text, 1, self.position - preAmount ) .. string_sub( text, self.position + ( postAmount or 1 ) )
+        self.position = self.position - preAmount
+    end
+end
+
+--[[
+    @instance
+    @desc Handles a 'key' event by moving the cursor (arrow keys), or removing text (delete/backspace), amongst other things
+    @param <KeyEvent Instance - event>, <boolean - handled>
+]]
+function EditableTextContainer:onKeyDown( event, handled )
+    if handled or not self.focused then return end
+
+    local key, lines, position, selection = event.keyName, self.lineConfig.lines, self.position, ( self.selection or self.position )
+    local isShift = self.application:isPressed( keys.leftShift ) or self.application:isPressed( keys.rightShift )
+
+    local old_tX
+    if key == "up" or key == "down" then
+        local line = lines[ isShift and self.cache.selY or self.cache.y ]
+        if not self.cache.tX then self.cache.tX = ( isShift and selection or position ) - line[ 2 ] + line[ 5 ] - 1 end
+
+        old_tX = self.cache.tX
+    end
+
+    if key == "up" then
+        local previousLine = lines[ ( isShift and self.cache.selY or self.cache.y ) - 1 ]
+        if not previousLine then return end
+
+        self[ isShift and "selection" or "position" ] = math.min( previousLine[ 2 ] + self.cache.tX - previousLine[ 5 ] + 1, previousLine[ 3 ] )
+    elseif key == "down" then
+        local nextLine = lines[ ( isShift and self.cache.selY or self.cache.y ) + 1 ]
+        if not nextLine then return end
+
+        self[ isShift and "selection" or "position" ] = math.min( nextLine[ 2 ] + self.cache.tX - nextLine[ 5 ] + 1, nextLine[ 3 ] - 1 )
+    elseif key == "left" then
+        if isShift then
+            self.selection = selection - 1
+        else
+            self.position = math.min( position, selection ) - 1
+        end
+    elseif key == "right" then
+        if isShift then
+            self.selection = selection + 1
+        else
+            self.position = math.max( position, selection - 1 ) + 1
+        end
+    elseif key == "backspace" then
+        self:removeContent( ( isShift and self.position - lines[ self.cache.y ][ 2 ] or 0 ) + 1 )
+    elseif key == "enter" then
+        self:insertContent "\n"
+    elseif key == "home" then
+        self[ isShift and "selection" or "position" ] = lines[ self.cache.y ][ 2 ] - 1
+    elseif key == "end" then
+        self[ isShift and "selection" or "position" ] = lines[ self.cache.y ][ 3 ] - ( lines[ self.cache.y + 1 ] and 1 or -1 )
+    end
+
+    self.cache.tX = old_tX or self.cache.tX
+end
+
+--[[
+    @instance
+    @desc Inserts the character pressed, replacing the selection if one is made
+    @param <CharEvent Instance - event>, <boolean - handled>
+]]
+function EditableTextContainer:onChar( event, handled )
+    if handled or not self.focused then return end
+    self:insertContent( event.char )
+end
+
+--[[
+    @instance
+    @desc Invokes the setter for selection on the super before resetting 'cache.tX'
+    @param <number - selection>
+]]
+function EditableTextContainer:setSelection( ... )
+    self.super:setSelection( ... )
+    self.cache.tX = false
+end
+
+--[[
+    @instance
+    @desc Invokes the setter for position on the super before resetting 'cache.tX'
+    @param <number - position>
+]]
+function EditableTextContainer:setPosition( ... )
+    self.super:setPosition( ... )
+    self.cache.tX = false
+end
+
+--[[
+    @instance
+    @desc Returns the information for the caret position, using cache.x and cache.y (caret only displayed when no selection is made and the node is focused)
+    @return <boolean - visible>, <number - x>, <number - y>, <number - colour> - When the x and y position of the caret is NOT out of the bounds of the node
+    @return <boolean - false> - When the x or y position of the caret IS out of bounds
+]]
+function EditableTextContainer:getCaretInfo()
+    if not ( self.cache.x and self.cache.y ) then return false end
+    local x, y = self.cache.x - self.xScroll, self.cache.y - self.yScroll
+    if x < 0 or x > self.width or y < 1 or y > self.height then return false end
+
+    local sX, sY = self:getAbsolutePosition()
+    return self.focused and not self.selection and true, x + sX - 1, y + sY - 1, self.focusedColour or self.colour
+end

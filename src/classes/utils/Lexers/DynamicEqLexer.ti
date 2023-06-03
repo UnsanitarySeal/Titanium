@@ -1,0 +1,70 @@
+--[[
+    A lexer that processes dynamic value equations into tokens used by DynamicEqParser
+]]
+
+class DynamicEqLexer extends Lexer
+
+--[[
+    @instance
+    @desc Finds a valid number in the current stream. Returns 'true' if one was found, 'nil' otherwise
+    @return <boolean - true> - Found a valid Lua number
+]]
+function DynamicEqLexer:lexNumber()
+    local stream = self:trimStream()
+    local exp, following = stream:match "^%d*%.?%d+(e)([-+]?%d*)"
+
+    if exp and exp ~= "" then
+        if following and following ~= "" then
+            self:pushToken { type = "NUMBER", value = self:consumePattern "^%d*%.?%d+e[-+]?%d*" }
+            return true
+        else self:throw "Invalid number. Expected digit after 'e'" end
+    elseif stream:find "^%d*%.?%d+" then
+        self:pushToken { type = "NUMBER", value = self:consumePattern "^%d*%.?%d+" }
+        return true
+    end
+end
+
+--[[
+    @instance
+    @desc The main token creator
+]]
+function DynamicEqLexer:tokenize()
+    local stream = self:trimStream()
+    local first = stream:sub( 1, 1 )
+
+    if stream:find "^%b{}" then
+        self:pushToken { type = "QUERY", value = self:consumePattern "^%b{}" }
+    elseif not self:lexNumber() then
+        if first == "'" or first == '"' then
+            self:pushToken { type = "STRING", value = self:consumeString( first ), surroundedBy = first }
+        elseif stream:find "^and%s" then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^and", binary = true }
+        elseif stream:find "^or%s" then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^or", binary = true }
+        elseif stream:find "^not%s" then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^not", unary = true }
+        elseif stream:find "^[#]" then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^[#]", unary = true }
+        elseif stream:find "^[/%*%%]" then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^[/%*%%]", binary = true }
+        elseif stream:find "^%.%." then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^%.%.", binary = true }
+        elseif stream:find "^%=%=" then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^%=%=", binary = true }
+        elseif stream:find "^%>" then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^%>", binary = true }
+        elseif stream:find "^%<" then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^%<", binary = true }
+        elseif stream:find "^[%+%-]" then
+            self:pushToken { type = "OPERATOR", value = self:consumePattern "^[%+%-]", ambiguos = true }
+        elseif stream:find "^[%(%)]" then
+            self:pushToken { type = "PAREN", value = self:consumePattern "^[%(%)]" }
+        elseif stream:find "^%." then
+            self:pushToken { type = "DOT", value = self:consumePattern "^%." }
+        elseif stream:find "^%w+" then
+            self:pushToken { type = "NAME", value = self:consumePattern "^%w+" }
+        else
+            self:throw("Unexpected block '".. ( stream:match( "%S+" ) or "" ) .."'")
+        end
+    end
+end

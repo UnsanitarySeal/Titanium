@@ -1,0 +1,127 @@
+local function getTagDetails( rule )
+    return ( rule.arguments.id and ( "#" .. rule.arguments.id ) or "" ) .. (function( classString ) local classes = ""; for className in classString:gmatch("%S+") do classes = classes .. "."..className end; return classes end)( rule.arguments["class"] or "" )
+end
+
+local function splitXMLTheme( queue, tree )
+    for i = 1, #tree do
+        local children = tree[ i ].children
+        if children then
+            for n = 1, #children do
+                local type = tree[ i ].type
+                queue[ #queue + 1 ] = { ( tree[ i ].arguments.typeOf and "~" or "" ) .. ( type == "Any" and "*" or type ) .. getTagDetails( tree[ i ] ), children[ n ], tree[ i ] }
+            end
+        end
+    end
+
+    return queue
+end
+
+--[[
+    @instance name - string (def. false) - The name of the theme. A name should always be set on the instance, and is a required constructor argument
+    @instance rules - table (def. {}) - The rules of this theme, generated via Theme.static.parse.
+
+    The Theme class is a basic class designed to hold styling rules.
+
+    Themes are added to objects using the MThemeManager mixin (or a custom implementation). These themes then dictate the appearance of objects that utilize 'MThemeable'.
+]]
+
+class Theme {
+    name = false;
+
+    rules = {};
+}
+
+--[[
+    @constructor
+    @desc Constructs the Theme by setting the name and, if 'source' is provided, parsing it and storing the result in 'rules'
+    @param <string - name>, [string - source]
+]]
+function Theme:__init__( name, source )
+    self.name = type( name ) == "string" and name or error("Failed to initialise Theme. Name '"..tostring( name ).."' is invalid, expected string.")
+
+    if source then self.rules = Theme.parse( source ) end
+end
+
+--[[
+    @static
+    @desc Parses XML source code by lexing/parsing it into an XML tree. The XML is then parsed into theme rules
+    @param <string - source>
+    @return <table - rules>
+]]
+function Theme.static.parse( source )
+    local queue, rawRules, q = splitXMLTheme( {}, XMLParser( source ).tree ), {}, 1
+
+    local function processQueueEntry( entry )
+        local queryPrefix, rule = entry[ 1 ], entry[ 2 ]
+        local children = rule.children
+
+        if children then
+            for n = 1, #children do
+                if not Titanium.getClass( rule.type ) and rule.type ~= "Any" then
+                    return error( "Failed to generate theme data. Child target '"..rule.type.."' doesn't exist as a Titanium class" )
+                end
+
+                local type = rule.type
+                queue[ #queue + 1 ] = { queryPrefix .. " " .. ( rule.arguments.direct and "> " or "" ) .. ( type == "Any" and "*" or type ) .. getTagDetails( rule ), children[ n ], rule }
+            end
+        elseif rule.content then
+            local ownerType = entry[ 3 ].type
+            local dynamic = rule.arguments.dynamic
+
+            local ruleTarget, computeType, value, ruleProperty = ownerType, false, rule.content, rule.type
+            if ownerType == "Any" then
+                ruleTarget, computeType = "ANY", true
+            elseif not dynamic then
+                local parentReg = Titanium.getClass( ownerType ).getRegistry()
+                local argumentTypes = parentReg.constructor and parentReg.constructor.argumentTypes or {}
+
+                if parentReg.alias[ rule.type ] then
+                    ruleProperty = parentReg.alias[ rule.type ]
+                end
+
+                value = XMLParser.convertArgType( value, argumentTypes[ parentReg.alias[ rule.type ] or rule.type ] )
+            end
+
+            if dynamic then
+                value = rule.content
+            end
+
+            if not rawRules[ ruleTarget ] then rawRules[ ruleTarget ] = {} end
+            if not rawRules[ ruleTarget ][ queryPrefix ] then rawRules[ ruleTarget ][ queryPrefix ] = {} end
+            table.insert( rawRules[ ruleTarget ][ queryPrefix ], {
+                computeType = not dynamic and computeType or nil,
+                property = ruleProperty,
+                value = value,
+                important = rule.arguments.important,
+                isDynamic = dynamic
+            })
+        else
+            return error( "Failed to generate theme data. Invalid theme rule found. No value (XML_CONTENT) has been set for tag '"..rule.type.."'" )
+        end
+    end
+
+    while q <= #queue do
+        processQueueEntry( queue[ q ] )
+        q = q + 1
+    end
+
+    return rawRules
+end
+
+--[[
+    @static
+    @desc Creates a Theme instance with the name passed and the source as the contents of the file at 'path'.
+    @param <string - name>, <string - path>
+    @return <Theme Instance - Theme>
+]]
+function Theme.static.fromFile( name, path )
+    if not fs.exists( path ) then
+        return error( "Path '"..tostring( path ).."' cannot be found" )
+    end
+
+    local h = fs.open( path, "r" )
+    local content = h.readAll()
+    h.close()
+
+    return Theme( name, content )
+end

@@ -1,0 +1,331 @@
+--[[
+    @instance width - number (def. 51) - The applications width, defines the width of the canvas.
+    @instance height - number (def. 19) - The applications width, defines the height of the canvas.
+    @instance threads - table (def. {}) - The threads currently stored on the Application. Includes stopped threads (due to finish, or exception).
+    @instance timers - table (def. {}) - The currently running timers. Timers that have finished are removed from the table. Repeating timers are simply re-queued via :schedule.
+    @instance running - boolean (def. false) - The current state of the application loop. If false, the application loop will stop.
+    @instance terminatable - boolean (def. false) - If true, the application will exit (running = false) when the 'terminate' event is caught inside the event loop.
+    @instance focusedNode - Node (def. nil) - If present, contains the currently focused node. This node is used to determine the application caret information using :getCaretInfo.
+
+    An Application object is the entry point to a Titanium Application. The Application derives a lot of it's functionality from
+    it's mixins. However, application-wide node focusing, threads, timers, animations and the event loop are all handled by this class.
+
+    This is why it is considered the heart of a Titanium project - without it, the project would simply not run due to the lack of a yielding
+    event-loop.
+]]
+
+class Application extends Component mixin MThemeManager mixin MKeyHandler mixin MCallbackManager mixin MAnimationManager mixin MNodeContainer mixin MProjectorManager mixin MDialogManager {
+    width = 51;
+    height = 19;
+
+    threads = {};
+    timers = {};
+
+    running = false;
+    terminatable = false;
+}
+
+--[[
+    @constructor
+    @desc Constructs an instance of the Application by setting all necessary unique properties on it
+    @param [number - width], [number - height]
+    @return <nil>
+]]
+function Application:__init__( ... )
+    self:super()
+    self:resolve( ... )
+    self.canvas = TermCanvas( self )
+
+    self:setMetaMethod("add", function( a, b )
+        local t = a ~= self and a or b
+
+        if Titanium.typeOf( t, "Node", true ) then
+            return self:addNode( t )
+        elseif Titanium.typeOf( t, "Thread", true ) then
+            return self:addThread( t )
+        end
+
+        error "Invalid targets for application '__add'. Expected node or thread."
+    end)
+end
+
+--[[
+    @instance
+    @desc Focuses the node provided application wide. The node will control the application caret and will have it's 'focused' property set to true
+          Also, the 'focus' callback will be called on the application, passing the node focused.
+    @param <Node Instance - node>
+]]
+function Application:focusNode( node )
+    if not Titanium.typeOf( node, "Node", true ) then
+        return error "Failed to update application focused node. Invalid node object passed."
+    end
+
+    self:unfocusNode()
+    self.focusedNode = node
+    node.changed = true
+
+    local ps = self.projectors
+    for i = 1, #ps do
+        ps[ i ].containsFocus = false
+    end
+
+    node:executeCallbacks( "focus", self )
+end
+
+--[[
+    @instance
+    @desc If called with no arguments, the currently focused node will be unfocused, and the 'unfocus' callback will be executed
+
+          If called with the targetNode argument, the currently focused node will only be unfocused if it *is* that node. If the focused node
+          is NOT the targetNode, the function will return. If it is, it will be unfocused and the 'unfocus' callback executed.
+    @param [Node Instance - targetNode]
+]]
+function Application:unfocusNode( targetNode )
+    local node = self.focusedNode
+    if not node or ( targetNode ~= node ) then return end
+
+    self.focusedNode = nil
+
+    node.raw.focused = false
+    node.changed = true
+
+    node:executeCallbacks( "unfocus", self )
+end
+
+--[[
+    @instance
+    @desc Adds a new thread named 'name' running 'func'. This thread will receive events caught by the Application engine
+    @param <threadObj - Thread Instance>
+    @return [threadObj | error]
+]]
+function Application:addThread( threadObj )
+    if not Titanium.typeOf( threadObj, "Thread", true ) then
+        error( "Failed to add thread, object '"..tostring( threadObj ).."' is invalid. Thread Instance required")
+    end
+
+    table.insert( self.threads, threadObj )
+
+    return threadObj
+end
+
+--[[
+    @instance
+    @desc Removes the thread named 'name'*
+    @param <Thread Instance - target> - Used when removing the thread provided
+    @param <string - target> - Used when removing the thread using the name provided
+    @return <boolean - success>, [node - removedThread**]
+
+    *Note: In order for the thread to be removed its 'id' field must match the 'id' parameter.
+    **Note: Removed thread will only be returned if a thread was removed (and thus success 'true')
+]]
+function Application:removeThread( target )
+    if not Titanium.typeOf( target, "Thread", true ) then
+        return error( "Cannot perform search for thread using target '"..tostring( target ).."'." )
+    end
+
+    local searchID = type( target ) == "string"
+    local threads, thread, threadID = self.threads
+    for i = 1, #threads do
+        thread = threads[ i ]
+
+        if ( searchID and thread.id == target ) or ( not searchID and thread == target ) then
+            thread:stop()
+
+            table.remove( threads, i )
+            return true, thread
+        end
+    end
+
+    return false
+end
+
+--[[
+    @instance
+    @desc Ships events to threads, if the thread requires a Titanium event, that will be passed instead.
+    @param <AnyEvent - eventObj>, <vararg - eData>
+]]
+function Application:handleThreads( eventObj, ... )
+    local threads = self.threads
+
+    local thread
+    for i = 1, #threads do
+        thread = threads[ i ]
+
+        if thread.titaniumEvents then
+            thread:handle( eventObj )
+        else
+            thread:handle( ... )
+        end
+    end
+end
+
+--[[
+    @instance
+    @desc Queues the execution of 'fn' after 'time' seconds.
+    @param <function - fn>, <number - time>, [boolean - repeating], [string - name]
+    @return <number - timerID>
+]]
+function Application:schedule( fn, time, repeating, name )
+    local timers = self.timers
+    if name then
+        self:unschedule( name )
+    end
+
+    local ID = os.startTimer( time )
+    self.timers[ ID ] = { fn, time, repeating, name }
+
+    return ID
+end
+
+--[[
+    @instance
+    @desc Unschedules the execution of a function using the name attached. If no name was assigned when scheduling, the timer cannot be cancelled using this method.
+    @param <string - name>
+    @return <boolean - success>
+]]
+function Application:unschedule( name )
+    local timers = self.timers
+    for timerID, timerDetails in next, timers do
+        if timerDetails[ 4 ] == name then
+            os.cancelTimer( timerID )
+            timers[ timerID ] = nil
+
+            return true
+        end
+    end
+
+    return false
+end
+
+--[[
+    @instance
+    @desc Returns the position of the application, used when calculating the absolute position of a child node relative to the term object
+    @return <number - X>, <number - Y>
+]]
+function Application:getAbsolutePosition()
+    return self.X, self.Y
+end
+
+--[[
+    @instance
+    @desc Begins the program loop
+]]
+function Application:start()
+    self:restartAnimationTimer()
+    self.running = true
+    while self.running do
+        self:draw()
+        local event = { coroutine.yield() }
+        local eName = event[ 1 ]
+
+        if eName == "timer" then
+            local timerID = event[ 2 ]
+            if timerID == self.timer then
+                self:updateAnimations()
+            elseif self.timers[ timerID ] then
+                local timerDetails = self.timers[ timerID ]
+                if timerDetails[ 3 ] then
+                    self:schedule( unpack( timerDetails ) )
+                end
+
+                self.timers[ timerID ] = nil
+                timerDetails[ 1 ]( self, timerID )
+            end
+        elseif eName == "terminate" and self.terminatable then
+            printError "Application Terminated"
+            self:stop()
+        end
+
+        self:handle( unpack( event ) )
+    end
+end
+
+--[[
+    @instance
+    @desc Draws changed nodes (or all nodes if 'force' is true)
+    @param [boolean - force]
+]]
+function Application:draw( force )
+    if not self.changed and not force then return end
+
+    local canvas = self.canvas
+    local nodes, node = self.nodes
+
+    for i = 1, #nodes do
+        node = nodes[ i ]
+        if force or ( node.needsRedraw and node.visible ) then
+            local shader, shadeText, shadeBackground = node.shader, node.shadeText, node.shadeBackground
+            node:draw( force )
+
+            if node.projector then
+                if node.mirrorProjector then
+                    node.canvas:drawTo( canvas, node.X, node.Y, shader, shadeText, shadeBackground )
+                end
+
+                node.resolvedProjector.changed = true
+            else
+                node.canvas:drawTo( canvas, node.X, node.Y, shader, shadeText, shadeBackground )
+            end
+
+            node.needsRedraw = false
+        end
+    end
+
+    -- Shade the application content, and draw the dialog container over the top of all other nodes
+    if self.isDialogOpen then self:drawDialogs() end
+
+    self.changed = false
+    local focusedNode, caretEnabled, caretX, caretY, caretColour = self.focusedNode
+    if focusedNode then
+        focusedNode:resolveProjectorFocus()
+
+        if focusedNode:can "getCaretInfo" then
+            caretEnabled, caretX, caretY, caretColour = focusedNode:getCaretInfo()
+        end
+    end
+
+    term.setCursorBlink( caretEnabled or false )
+    canvas:draw( force, self.shader, self.shadeText, self.shadeBackground )
+
+    if caretEnabled then
+        term.setTextColour( caretColour or self.colour or 32768 )
+        term.setCursorPos( caretX or 1, caretY or 1 )
+    end
+
+    self:updateProjectors()
+end
+
+--[[
+    @instance
+    @desc Spawns a Titanium event instance and ships it to nodes and threads.
+    @param <table - event>
+]]
+function Application:handle( eName, ... )
+    local eventObject = Event.spawn( eName, ... )
+    if eventObject.main == "KEY" then self:handleKey( eventObject ) end
+
+    if self.isDialogOpen then self.dialogContainer:handle( eventObject ) end
+
+    local nodes, node = self.nodes
+    for i = #nodes, 1, -1 do
+        node = nodes[ i ]
+        -- The node will update itself depending on the event. Once all are updated they are drawn if changed.
+        if node then node:handle( eventObject ) end
+    end
+
+    self:executeCallbacks( eName, eventObject )
+    self:handleThreads( eventObject, eName, ... )
+end
+
+--[[
+    @instance
+    @desc Stops the program loop
+]]
+function Application:stop()
+    if self.running then
+        self.running = false
+        os.queueEvent( "ti_app_close" )
+    else
+        return error "Application already stopped"
+    end
+end

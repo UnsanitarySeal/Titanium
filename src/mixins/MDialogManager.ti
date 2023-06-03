@@ -1,0 +1,87 @@
+--[[
+    @instance dialogContainer - OverlayContainer Instance (def. false) - The overlay container used to shade the background of the application when dialog windows are open
+
+    A mixin to control the focus of dialog windows, and their overlay
+]]
+
+abstract class MDialogManager {
+    dialogContainer = false;
+}
+
+--[[
+    @constructor
+    @desc Creates the dialogContainer (OverlayContainer) and sets important dynamic values on it
+]]
+function MDialogManager:MDialogManager()
+    -- Create a node that is *loosely* linked to the application (not inside app.nodes, or added via :addNode but does reference it via `cont.application`).
+    self.dialogContainer = OverlayContainer():set {
+        id = "application_dialog_container",
+        application = self,
+        parent = self,
+
+        width = "$application.width",
+        height = "$application.height"
+    }
+end
+
+--[[
+    @instance
+    @desc Draw the dialog window container to the application canvas, typically used after drawing nodes to the TermCanvas
+]]
+function MDialogManager:drawDialogs()
+    local container = self.dialogContainer
+
+    container:draw()
+    container.canvas:drawTo( self.canvas, 1, 1, container.shader, container.shadeText, container.shadeBackground )
+end
+
+--[[
+    @instance
+    @desc Adds a dialog window (Window instance) to the application and assigns important binds to it (when closed or focused this mixin handles it)
+    @param <Window Instance - dialog>
+]]
+function MDialogManager:addDialog( dialog )
+    if not Titanium.typeOf( dialog, "Window", true ) then
+        return error "Expected 'Window' instance to add dialog box"
+    end
+
+    self.dialogContainer:addNode( dialog )
+    dialog:on("close", function()
+        self.isDialogOpen = #self.dialogContainer.nodes > 0
+    end):on("windowFocus", function()
+        self:shiftDialogFocus( dialog )
+    end)
+
+    self.isDialogOpen = true
+    return dialog
+end
+
+--[[
+    @instance
+    @desc Called automatically when an open dialog is focused. This function puts the dialog to the top of the list (shifting the other dialogs down)
+    @param <Window Instance - target>
+]]
+function MDialogManager:shiftDialogFocus( target )
+    local dialogContainerNodes = self.dialogContainer.nodes
+    for i = 1, #dialogContainerNodes do
+        dialogContainerNodes[ i ].Z = dialogContainerNodes[ i ] == target and #dialogContainerNodes + 1 or i
+    end
+end
+
+--[[
+    @instance
+    @desc Removes a dialog from the application
+    @param <Window Instance - dialog>
+]]
+function MDialogManager:removeDialog( dialog )
+    self.dialogContainer:removeNode( dialog )
+
+    self.isDialogOpen = #self.dialogContainer.nodes > 0
+    return dialog
+end
+
+configureConstructor {
+    argumentTypes = {
+        isDialogOpen = "boolean"
+    }
+}

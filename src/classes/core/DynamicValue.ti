@@ -1,0 +1,153 @@
+--[[
+    @instance target - Instance (def. false) - The instance that 'property' is stored on
+    @instance property - string (def. false) - The property to control
+    @instance equation - string (def. false) - The equation to parse (DynamicEqParser)
+    @instance resolvedStacks - table (def. false) - The stacks resolved after parsing (automatically set, avoid changing manually)
+    @instance cachedValues - table (def. {}) - The values cached from all stacks (ie: the values from the instances depended on by the dynamic equation). Should not be changed manually
+    @instance attached - boolean (def. false) - When true the dynamic value has already hooked itself into all stack instances
+
+    A basic class that facilitates the use of DynamicValues across Titanium. Manages the lexing and parsing of equations, the resolution of stacks
+    and the application of the values.
+]]
+
+class DynamicValue {
+    target = false;
+
+    equation = false;
+    compiledEquation = false;
+
+    resolvedStacks = false;
+
+    cachedValues = {};
+
+    attached = false;
+}
+
+--[[
+    @constructor
+    @desc Initializes the DynamicValue instance. Set's the target (instance), property (string) and equation (string) of the
+          dynamic value, parses the equation and stores the parser on the instance (eq).
+
+          If 'manualSetter' is passed this function will be called when the dynamic value updates it's property (passing the dynamic value, target, property and, value).
+    @param <Instance - target>, <string - property>, <string - equation>, [function - manualSetter]
+]]
+function DynamicValue:__init__( target, property, equation, manualSetter )
+    if not ( Titanium.typeOf( target, "Node", true ) and type( property ) == "string" and type( equation ) == "string" ) then
+        return error("Failed to initialise DynamicValue. Expected 'Node Instance', string, string.", 3 )
+    end
+
+    self.target = target
+    self.property = property
+    self.equation = equation
+    self.manualSetter = manualSetter
+
+    self.eq = DynamicEqParser( equation )
+    self.compiledEquation = loadstring( self.eq.output, "DYNAMIC_VALUE_EQUATION@" .. self.__ID )
+end
+
+--[[
+    @instance
+    @desc Solves the equation (compiledEquation)
+]]
+function DynamicValue:solve()
+    if not self.compiledEquation then
+        return error "Cannot solve DynamicValue. Dynamic equation has not been compiled yet, try :refresh"
+    end
+
+    local ok, err = pcall( self.compiledEquation, self.cachedValues )
+    if ok then
+        local target = self.target
+
+        -- Stop MThemeable picking up this update and changing the mainValue to match
+        target.isUpdating = true
+        if self.manualSetter then
+            self.manualSetter( self, target, self.property, XMLParser.convertArgType( err, self.propertyType ) )
+        else
+            target[ self.property ] = XMLParser.convertArgType( err, self.propertyType )
+        end
+
+        target.isUpdating = false
+    else
+        printError( "[WARNING]: Failed to solve DynamicValue. Dynamic equation failed to execute '"..tostring( err ).."'" )
+        self:detach()
+    end
+end
+
+--[[
+    @instance
+    @desc Create the property links for all properties required by the dynamic value.
+]]
+function DynamicValue:attach()
+    local resolvedStacks = self.resolvedStacks
+    if not resolvedStacks then
+        return error "Cannot attach DynamicValue. Dynamic stacks have not been resolved yet, try :refresh"
+    end
+
+    self:detach()
+
+    local stack
+    for i = 1, #resolvedStacks do
+        stack = resolvedStacks[ i ]
+
+        stack[ 2 ]:watchProperty( stack[ 1 ], function( _, __, value )
+            self.cachedValues[ i ] = value
+            self:solve()
+        end, "DYNAMIC_VALUE_" .. self.__ID .. "_" .. i )
+    end
+
+    self.attached = true
+end
+
+--[[
+    @instance
+    @desc Removes the property links for all properties required by the dynamic value.
+]]
+function DynamicValue:detach()
+    local resolvedStacks = self.resolvedStacks
+    if not resolvedStacks then return end
+
+    local stack
+    for i = 1, #resolvedStacks do
+        stack = resolvedStacks[ i ]
+
+        stack[ 2 ]:unwatchProperty( stack[ 1 ], "DYNAMIC_VALUE_" .. self.__ID .. "_" .. i )
+    end
+
+    self.attached = false
+end
+
+--[[
+    @instance
+    @desc Invokes :detach on the dynamic value to remove all property links, before removing the DynamicValue instance from the targets MDynamic register.
+]]
+function DynamicValue:destroy()
+    if self.target then
+        self.target:removeDynamicValue( self.property )
+    end
+end
+
+--[[
+    @instance
+    @desc Refresh the dynamic value by resolving the instance stacks, removing any current property links and re-attaching the dynamic value to it's targets
+]]
+function DynamicValue:refresh()
+    local stacks, newCachedValues = self.eq:resolveStacks( self.target, true ), {}
+    if stacks then
+        self.resolvedStacks = stacks
+        self:attach()
+
+        local stack
+        for i = 1, #stacks do
+            stack = stacks[ i ]
+            newCachedValues[ i ] = stack[ 2 ][ stack[ 1 ] ]
+        end
+    end
+
+    if self.target then
+        local reg = Titanium.getClass( self.target.__type ).getRegistry().constructor.argumentTypes
+        self.propertyType = reg[ self.property ]
+    end
+
+    self.resolvedStacks, self.cachedValues = stacks, newCachedValues
+    if stacks then self:solve() end
+end

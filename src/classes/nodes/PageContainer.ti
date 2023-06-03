@@ -1,0 +1,253 @@
+--[[
+    The PageContainer serves as a container that shows one 'page' at a time. Preset (or completely custom) animated transitions can be used when
+    a new page is selected.
+]]
+
+class PageContainer extends Container {
+    scroll = 0;
+
+    animationDuration = 0.25;
+    animationEasing = "outQuad";
+    customAnimation = false;
+    selectedPage = false;
+}
+
+--[[
+    @instance
+    @desc Intercepts the draw call, adding the x scroll to the x offset
+    @param [boolean - force], [number - offsetX], [number - offsetY]
+]]
+function PageContainer:draw( force, offsetX, offsetY )
+    if not self.selectedPage then
+        self.canvas:drawTextLine( 1, 1, "No page selected", 16384, 1 )
+    else
+        return self.super:draw( force, ( offsetX or 0 ) - self.scroll, offsetY )
+    end
+end
+
+--[[
+    @instance
+    @desc If a MOUSE event is handled, it's X co-ordinate is adjusted using the scroll offset of the page container.
+    @param <Event Instance - eventObj>
+    @return <boolean - propagate>
+]]
+function PageContainer:handle( eventObj )
+    if not self.super.super:handle( eventObj ) then return end
+
+    local clone
+    if eventObj.main == "MOUSE" then
+        clone = eventObj:clone( self )
+        clone.X = clone.X + self.scroll
+        clone.isWithin = clone.isWithin and eventObj:withinParent( self ) or false
+    end
+
+    self:shipEvent( clone or eventObj )
+    if clone and clone.isWithin and ( self.consumeAll or clone.handled ) then
+        eventObj.handled = true
+    end
+    return true
+end
+
+--[[
+    @instance
+    @desc Links the target page to this page container (ties width/height of Page to parents)
+    @param <Page Instance - page>
+]]
+function PageContainer:linkPage( page )
+    if not Titanium.typeOf( page, "Page", true ) then return error("Failed to link page '"..tostring( page ).."'. Expected Page instance.") end
+    page:linkProperties( self, "width", "height" )
+    page.Y = 1
+end
+
+--[[
+    @instance
+    @desc Removes links to the target page
+    @param <Page Instance - page>
+]]
+function PageContainer:unlinkPage( page )
+    if not Titanium.typeOf( page, "Page", true ) then return error("Failed to unlink page '"..tostring( page ).."'. Expected Page instance.") end
+    page:unlinkProperties( self, "width", "height" )
+end
+
+--[[
+    @instance
+    @desc Selects the new page using the 'pageID'. If a function is given as argument #2 'animationOverride', it will be called instead of the customAnimation
+          set (or the default animation method used).
+
+          Therefore the animationOverride is given full control of the transition, allowing for easy one-off transition effects.
+
+          If 'customAnimation' is set on the instance, it will be called if no 'animationOverride' is provided, providing a more long term override method.
+
+          If neither are provided, a normal animation will take place, using 'animationDuration' and 'animationEasing' set on the instance as parameters for the animation.
+    @param <string - pageID>, [function - animationOverride]
+]]
+function PageContainer:selectPage( pageID, animationOverride )
+    local page = self:getPage( pageID )
+
+    self.selectedPage = page
+    if type( animationOverride ) == "function" then
+        return animationOverride( self.currentPage, page )
+    elseif self.customAnimation then
+        return self.customAnimation( self.currentPage, page )
+    end
+
+    self:animate( self.__ID .. "_PAGE_CONTAINER_SELECTION", "scroll", page.X - 1, self.animationDuration, self.animationEasing )
+end
+
+--[[
+    @instance
+    @desc Updates 'resolvedPosition' on pages without a specific 'position'.
+]]
+function PageContainer:updatePagePositions()
+    local pages, usedIndexes = self.nodes, {}
+    for i = 1, #pages do
+        local page = pages[ i ]
+        if Titanium.typeOf( page, "Page", true ) then
+            local pagePosition = page.position
+            if pagePosition and not page.isPositionTemporary then
+                usedIndexes[ pagePosition ] = true
+            end
+        end
+    end
+
+    local currentIndex = 0
+    for i = 1, #pages do
+        local page = pages[ i ]
+        if Titanium.typeOf( page, "Page", true ) then
+            if not page.position or page.isPositionTemporary then
+                repeat
+                    currentIndex = currentIndex + 1
+                until not usedIndexes[ currentIndex ]
+
+                page.isPositionTemporary = true
+                page.raw.position = currentIndex
+            end
+
+            page:updatePosition()
+        end
+    end
+end
+
+--[[
+    @instance
+    @desc Ensures the node being added to the PageContainer is a 'Page' node because no other nodes should be added directly to this node
+    @param <Page Instance - node>
+    @return <Page Instance - node>
+]]
+function PageContainer:addNode( node )
+    if Titanium.typeOf( node, "Page", true ) then
+        local pgInd = self.pageIndexes
+        if self:getPage( node.id ) then
+            return error("Cannot add page '"..tostring( node ).."'. Another page with the same ID already exists inside this PageContainer")
+        end
+
+        self.super:addNode( node )
+        self:updatePagePositions()
+        return node
+    end
+
+    return error("Only 'Page' nodes can be added as direct children of 'PageContainer' nodes, '"..tostring( node ).."' is invalid")
+end
+
+--[[
+    @instance
+    @desc Overrides the super :removeNode so that page checking can be performed.
+          If removed page was the currently selected page, the page selection is reset
+
+          Tabs are reset after the node has been removed.
+    @param <Instance 'Node'/string name - target>
+    @return <boolean - success>, [node - removedNode]
+]]
+function PageContainer:removeNode( ... )
+    local rem, node = self.super:removeNode( ... )
+    if rem and node == self.selectedPage then
+        self.selectedPage = nil
+    end
+
+    self:formTabs()
+    return rem, node
+end
+
+--[[
+    @instance
+    @desc An alias for 'addNode', contextualized for the PageContainer
+    @param <Page Instance - page>
+    @return 'param1 (page)'
+]]
+function PageContainer:addPage( page )
+    return self:addNode( page )
+end
+
+--[[
+    @instance
+    @desc An alias for 'getNode', contextualized for the PageContainer
+    @param <string - id>, [boolean - recursive]
+    @return [Node Instance - node]
+]]
+function PageContainer:getPage( ... )
+    return self:getNode( ... )
+end
+
+--[[
+    @instance
+    @desc An alias for 'removeNode', contextualized for the PageContainer
+    @param <Node Instance | string - id>
+    @return <boolean - success>, [node - removedNode]
+]]
+function PageContainer:removePage( ... )
+    return self:removeNode( ... )
+end
+
+--[[
+    @instance
+    @desc Shifts requests to clear the PageContainer area to the left, depending on the scroll position of the container
+    @param <number - x>, <number - y>, <number - width>, <number - height>
+]]
+function PageContainer:redrawArea( x, y, width, height )
+    self.super:redrawArea( x - self.scroll, y, width, height, -self.scroll )
+end
+
+--[[
+    @setter
+    @desc Due to the contents of the PageContainer not actually moving (just the scroll), the content of the PageContainer must be manually cleared.
+          To fit this demand, the area of the PageContainer is cleared when the scroll parameter is changed.
+]]
+function PageContainer:setScroll( scroll )
+    self.scroll = scroll
+    self.changed = true
+    self:redrawArea( 1, 1, self.width, self.height )
+end
+
+--[[
+    @setter
+    @desc Sets the page containers width, updates the page positions and adjusts the scroll to match that of the selected page
+    @param <number - width>
+]]
+function PageContainer:setWidth( width )
+    self.super:setWidth( width )
+    self:updatePagePositions()
+
+    if self.selectedPage then self.scroll = self.selectedPage.X - 1 end
+end
+
+--[[
+    @setter
+    @desc Sets the page containers height, updates the page positions and adjusts the scroll to match that of the selected page
+    @param <number - height>
+]]
+function PageContainer:setHeight( height )
+    self.super:setHeight( height )
+    self:updatePagePositions()
+
+    if self.selectedPage then self.scroll = self.selectedPage.X - 1 end
+end
+
+configureConstructor {
+    argumentTypes = {
+        animationDuration = "number",
+        animationEasing = "string",
+        customAnimation = "function",
+        selectedPage = "string",
+        scroll = "number"
+    }
+}

@@ -1,0 +1,388 @@
+--[[
+    @static proxyMethods - table (def. { "addNode", ... }) - The proxy methods being automatically created by the window. See 'about' for more information regarding proxy methods.
+
+    @instance title - string (def. nil) - The windows title, displayed inside the title bar (titleBar must be true)
+    @instance titleBar - boolean (def. true) - If true a title bar will be displayed at the top of the window which can be used to drag the window. Stored in 'window.titleBarContent', or can be queried using '#titlebar'
+    @instance titleBarColour - colour (def. 256) - The colour of the title bar
+    @instance titleBarBackgroundColour - colour (def. 128) - The background colour of the title bar
+    @instance closeable - boolean (def. true) - If true a close button will be visible (and enabled) in the top right. Only available when the title bar is enabled
+    @instance closeButtonChar - string (def. "\7") - The text used inside the close button
+    @instance closeButtonColour - colour (def. 16384) - The colour of the close button
+    @instance closeButtonBackgroundColour - colour (def. nil) - The background colour of the close button
+    @instance resizeable - boolean (def. true) - If true the window will be resizeable via the resize handle in the bottom right of the window
+    @instance resizeButtonChar - string (def. "/") - The character used when drawing the resize handle
+    @instance resizeButtonColour - colour (def. 256) - The colour of the resize handle
+    @instance resizeButtonBackgroundColour - colour (def. nil) - The background colour of the resize handle
+    @instance moveable - boolean (def. true) - When true the window can be moved around by clicking and dragging the top of the window
+    @instance shadow - boolean (def. true) - When true, a shadow will be drawn around the window
+    @instance shadowColour - colour (def. 128) - The colour of the shadow
+    @instance transparent - boolean (def. true) - The transparency value of the window. Should be kept 'true' to ensure correct functionality when using a shadow
+    @instance passiveFocus - boolean (def. true) - When true the window will not override global focus (allowing content to be focused for typing). Should be kept 'true'
+
+    The Window is a niche Titanium node that allows entire containers to be dragged and resized on the screen. Titanium does *not* provide built-in management
+    of windows. If you intend to use them for your project it is suggested you keep track of windows and automatically cycle their z-values.
+
+    The 'content' key on the window contains all the nodes INSIDE the window, excluding the window itself. However the 'nodes' key contains every node, including the title bar, the close
+    button, and the actual content scroll container.
+
+    The Window provides 'proxyMethods'. For example, by default :addNode is actually a proxy that adds the node to 'window.content'. If you intend to add the node directly to the window
+    use ':addNodeRaw'. This applies to addNode, removeNode, getNode, query, and clearNodes. Edit Window.static.proxyMethods to change which proxy methods exist.
+
+    By default windows feature a close button, and resize handle, a title bar and a shadow. These can all be adjusted using the Window property OR by
+    directly targeting the nodes.
+
+    *Every* aspect of the window can be changed directly by querying the particular part of the window via ':query' or ':queryRaw'. However, it is preferred that if possible the window
+    is configured using the instance properties provided (ie: window.backgroundColour is preferred instead of window.content.backgroundColour or window:queryRaw "#content":set { ... }).
+
+    However, if you must target the node completely, you can do so via 'queryRaw' and the following target:
+        - The window main content, where the user content will appear: '#content'
+        - The title bar: '#titlebar'
+        - The title content (inside the title bar): '#titlebar > #title'
+        - The close button (inside the title bar): '#titlebar > #close'
+]]
+
+class Window extends Container mixin MFocusable mixin MInteractable {
+    static = {
+        proxyMethods = { "addNode", "removeNode", "getNode", "query", "clearNodes" },
+        proxyProperties = { "marginLeft", "marginRight", "marginTop", "marginBottom", "fluidDimensions", "positioning", "minWidth", "minHeight", "maxWidth", "maxHeight", "positionChanged" }
+    };
+
+    titleBar = true;
+    titleBarColour = 256;
+    titleBarBackgroundColour = 128;
+
+    closeable = true;
+    closeButtonChar = "\7";
+    closeButtonColour = 16384;
+
+    resizeable = true;
+    resizeButtonChar = "/";
+    resizeButtonColour = 256;
+
+    moveable = true;
+
+    shadow = true;
+    shadowColour = 128;
+
+    transparent = true;
+
+    passiveFocus = true;
+}
+
+--[[
+    @constructor
+    @desc Creates the default window layout, complete with a title bar and content container
+]]
+function Window:__init__( ... )
+    self:resolve( ... )
+    self:super()
+
+    self.titleBarContent = self:addNode( Container():set {
+        id = "titlebar",
+
+        width = "$parent.width - ( parent.shadow and 1 or 0 )",
+
+        backgroundColour = "$parent.titleBarBackgroundColour",
+        colour = "$not parent.enabled and parent.disabledColour or parent.titleBarColour",
+
+        visible = "$parent.titleBar",
+        enabled = "$self.visible",
+        positioning = "normal"
+    })
+
+    self.titleBarTitle = self.titleBarContent:addNode( Label( "" ) ):set { id = "title" }
+
+    local b = self.titleBarContent:addNode( Button( "" ):set( "X", "$parent.width" ) )
+    b:set {
+        backgroundColour = "$parent.parent.closeButtonBackgroundColour",
+        colour = "$parent.parent.closeButtonColour",
+        text = "$parent.parent.closeButtonChar",
+        visible = "$parent.parent.closeable",
+        enabled = "$self.visible",
+        id = "close",
+        width = 1
+    }
+
+    b:on("trigger", function() self:remove() end)
+
+    self.content = self:addNode( ScrollContainer():set {
+        Y = "$parent.titleBar and 2 or 1",
+
+        width = "$parent.width - ( parent.shadow and 1 or 0 )",
+        height = "$parent.height - ( parent.titleBar and 1 or 0 ) - ( parent.shadow and 1 or 0 )",
+
+        backgroundColour = "$parent.enabled and ( parent.focused and parent.focusedBackgroundColour ) or ( not parent.enabled and parent.disabledBackgroundColour ) or parent.backgroundColour",
+        colour = "$parent.enabled and ( parent.focused and parent.focusedColour ) or ( not parent.enabled and parent.disabledColour ) or parent.colour",
+
+        id = "content"
+    } )
+
+    for _, name in pairs( Window.static.proxyProperties ) do
+        self.content[ name ] = ("$parent.%s"):format( name )
+    end
+
+    self:createProxies()
+
+    self:on("remove", function() self:executeCallbacks "close" end)
+    self:watchProperty( "width", function( _, __, value )
+        return self:updateWidth( value )
+    end, "WINDOW_MIN_MAX_WIDTH_CHECK" )
+
+    self:watchProperty( "height", function( _, __, value )
+        return self:updateHeight( value )
+    end, "WINDOW_MIN_MAX_HEIGHT_CHECK" )
+end
+
+--[[
+    @constructor
+    @desc After all the instance mixins are ready, this function is called allowing the dynamic value default to be set (before post init, the MPropertyManager is not listening for property changes)
+]]
+function Window:__postInit__()
+    if not self.resizeButtonBackgroundColour then
+        -- Apply the default dynamic value
+        self.resizeButtonBackgroundColour = "$self.content.backgroundColour"
+    end
+
+    self.consumeAll = false
+    self.super:__postInit__()
+end
+
+--[[
+    @instance
+    @desc For each method in Window.static.proxyMethods, a 'raw' method (ie: addNodeRaw) is created (which performs the action on the window), and a normal method (ie: addNode) is
+          created that performs the action on the 'content' provided (for example, the 'actionContainer' of a DialogWindow)
+    @param <Instance - content>
+]]
+function Window:createProxies( content )
+    content = content or self.content
+    for _, name in pairs( Window.static.proxyMethods ) do
+        self[ name ] = function( self, ... )
+            return content[ name ]( content, ... )
+        end
+
+        self[ name .. "Raw" ] = function( self, ... )
+            return self.super[ name ]( self, ... )
+        end
+    end
+end
+
+--[[
+    @instance
+    @desc Handles a mouse click by checking the location of the click. Depending on the location will either move, resize, focus or unfocus the window.
+    @param <MouseEvent Instance - event>, <boolean - handled>, <boolean - within>
+]]
+function Window:onMouseClick( event, handled, within )
+    local X, Y = event.X - self.X + 1, event.Y - self.Y + 1
+    if within and not ( self.shadow and ( X == self.width or Y == self.height ) ) and not handled then
+        if event.button == 1 then
+            self:focus()
+            self:executeCallbacks "windowFocus"
+
+            if self.moveable and Y == 1 and ( X >= 1 and X <= self.titleBarContent.width - ( self.closeable and 1 or 0 ) ) then
+                self:updateMouse( "move", X, Y )
+                event.handled = true
+            elseif self.resizeable and Y == self.content.height + ( self.titleBar and 1 or 0 ) and X == self.content.width then
+                self:updateMouse( "resize", event.X - self.width + 1, event.Y - self.height + 1 )
+                event.handled = true
+            end
+        end
+    else
+        self:unfocus()
+        self:executeCallbacks "windowUnfocus"
+    end
+end
+
+--[[
+    @instance
+    @desc Removes the mouse param (used when moving or resizing), preventing further manipulation of the window
+    @param <MouseEvent Instance - event>, <boolean - handled>, <boolean - within>
+]]
+function Window:onMouseUp( event, handled, within )
+    self.mouse = false
+end
+
+--[[
+    @instance
+    @desc Handles a mouse drag by passing the request to the MInteractable mixin (handleMouseDrag)
+    @param <MouseEvent Instance - event>, <boolean - handled>, <boolean - within>
+]]
+function Window:onMouseDrag( event, handled, within )
+    self:handleMouseDrag( event, handled, within )
+end
+
+--[[
+    @instance
+    @desc Redirects attempts to resolve the fluid positions of this Window to the content instead
+]]
+function Window:resolveFluidPositions()
+    self.content:resolveFluidPositions()
+end
+
+--[[
+    @instance
+    @desc Updates the titleBar label to display a correctly truncated version of the windows title.
+]]
+function Window:updateTitle()
+    local title, titleContentWidth = self.title, self.titleBarContent.width - ( self.closeable and 3 or 2 )
+
+    self.titleBarTitle.text = title and #title > titleContentWidth and title:sub( 1, math.max( 1, titleContentWidth - 2 ) ) .. ".." or title or ""
+end
+
+--[[
+    @instance
+    @desc Returns a bounded (min/max width) version of 'w' (or self.width if 'w' not provided).
+    @param [number - w]
+    @return <number - boundedW>
+]]
+function Window:updateWidth( w )
+    w = w or self.width
+
+    w = self.minWidth and math.max( w, self.minWidth ) or w
+    return math.max( self.maxWidth and math.min( w, self.maxWidth ) or w, ( self.shadow and 4 or 3 ) )
+end
+
+--[[
+    @instance
+    @desc Returns a bounded (min/max height) version of 'h' (or self.height if 'h' not provided).
+    @param [number - h]
+    @return <number - boundedH>
+]]
+function Window:updateHeight( h )
+    h = h or self.height
+
+    h = self.minHeight and math.max( h, self.minHeight ) or h
+    return math.max( self.maxHeight and math.min( h, self.maxHeight ) or h, ( self.titleBar and 4 or 3 ) )
+end
+
+--[[
+    @instance
+    @desc A custom draw function that invokes the super:draw method, before drawing the shadow and resize handle over top.
+]]
+function Window:draw( force, ... )
+    if force or self.changed then
+        self.super:draw( force, ... )
+
+        if self.shadow then
+            local canvas = self.canvas
+            canvas:drawBox( self.width, 2, 1, self.height - 2, self.shadowColour )
+            canvas:drawBox( 3, self.height, self.width - 2, 1, self.shadowColour )
+        end
+
+        if self.resizeable then
+            self.canvas:drawPoint( self.content.width, self.content.height + ( self.titleBar and 1 or 0 ), self.resizeButtonChar, self.resizeButtonColour, self.resizeButtonBackgroundColour )
+        end
+    end
+end
+
+--[[
+    @setter
+    @desc Sets the width of the window, following the min/max properties (ie: uses :updateWidth())
+    @param <number - width>
+]]
+function Window:setWidth( width )
+    self.super:setWidth( self:updateWidth( width ) )
+    self:updateTitle()
+end
+
+--[[
+    @setter
+    @desc Sets the minimum width the window can be. The current width will be increased if it falls below this limit.
+    @param <number - minWidth>
+]]
+function Window:setMinWidth( minWidth )
+    self.minWidth = minWidth
+    self:updateWidth()
+end
+
+--[[
+    @setter
+    @desc Sets the maximum width the window can be. The current width will be reduced if it exceeds this limit.
+    @param <number - maxWidth>
+]]
+function Window:setMaxWidth( maxWidth )
+    self.maxWidth = maxWidth
+    self:updateWidth()
+end
+
+--[[
+    @setter
+    @desc Sets the height of the window, following the min/max properties (ie: uses :updateHeight())
+    @param <number - height>
+]]
+function Window:setHeight( height )
+    self.super:setHeight( self:updateHeight( height ) )
+end
+
+--[[
+    @setter
+    @desc Sets the minimum height the window can be. The current height will be increased if it falls below this limit.
+    @param <number - minHeight>
+]]
+function Window:setMinHeight( minHeight )
+    self.minHeight = minHeight
+    self:updateHeight()
+end
+
+--[[
+    @setter
+    @desc Sets the maximum height the window can be. The current height will be reduced if it exceeds this limit.
+    @param <number - maxHeight>
+]]
+function Window:setMaxHeight( maxHeight )
+    self.maxHeight = maxHeight
+    self:updateHeight()
+end
+
+--[[
+    @setter
+    @desc Sets the new title of the window, and then calls :updateTitle to apply the change to the titleBar label
+    @param <string - title>
+]]
+function Window:setTitle( title )
+    self.title = title
+    self:updateTitle()
+end
+
+--[[
+    @setter
+    @desc When the shadow of the window is updated, the window is redrawn to show the change
+    @param <boolean - enabled>
+]]
+function Window:setShadow( enabled )
+    self.shadow = enabled
+    self.changed = true
+end
+
+--[[
+    @setter
+    @desc When the shadow colour of the window is updated, the window is redrawn to show the change
+    @param <colour - colour>
+]]
+function Window:setShadowColour( colour )
+    self.shadowColour = colour
+    self.changed = true
+end
+
+configureConstructor {
+    argumentTypes = {
+        title = "string",
+        titleBar = "boolean",
+        titleBarColour = "colour",
+        titleBarBackgroundColour = "colour",
+
+        closeable = "boolean",
+        closeButtonChar = "string",
+        closeButtonColour = "colour",
+        closeButtonBackgroundColour = "colour",
+
+        resizeable = "boolean",
+        resizeButtonChar = "string",
+        resizeButtonColour = "colour",
+        resizeButtonBackgroundColour = "colour",
+
+        moveable = "boolean",
+
+        shadow = "boolean",
+        shadowColour = "colour"
+    }
+}

@@ -1,0 +1,145 @@
+local string_len, string_find, string_sub, string_gsub, string_match = string.len, string.find, string.sub, string.gsub, string.match
+
+--[[
+    This mixin is designed to be used by nodes that wish to display formatted text (e.g: Button, TextContainer).
+    The 'drawText' function should be called from the node during draw time.
+
+    This class assigns tmlContent to 'text'. This means that (unless changed by the class, see their documentation) the content between TML open and close tags will be assigned to the 'text' property
+    (ie: <Label text='test'/> is the same as <Label>test</Label> because Label uses MTextDisplay and doesn't override 'tmlContent').
+]]
+
+abstract class MTextDisplay {
+    lineConfig = {
+        lines = false;
+        alignedLines = false;
+        offsetY = 0;
+    };
+
+    verticalPadding = 0;
+    horizontalPadding = 0;
+
+    verticalAlign = "top";
+    horizontalAlign = "left";
+
+    includeNewlines = false;
+}
+
+--[[
+    @constructor
+    @desc Registers properties used by this class with the theme handler if the object mixes in 'MThemeable'
+]]
+function MTextDisplay:MTextDisplay()
+    if Titanium.mixesIn( self, "MThemeable" ) then
+        self:register( "text", "verticalAlign", "horizontalAlign", "verticalPadding", "horizontalPadding" )
+    end
+end
+
+--[[
+    @instance
+    @desc Generates a table of text lines by wrapping on newlines or when the line gets too long.
+    @param <number - width>
+]]
+function MTextDisplay:wrapText( width )
+    local text, width, lines = self.text, width or self.width, {}
+    local align, halfWidth = self.horizontalAlign, width / 2
+
+    if width == 0 then return end
+
+    local current = 1
+    while text and string_len( text ) > 0 do
+        local section, pre, post = string_sub( text, 1, width )
+        local starting = current
+        local createTrail
+
+        if string_find( section, "\n" ) then
+            pre, post = string_match( text, "(.-\n)(.*)$" )
+
+            current = current + string_len( pre )
+
+            if post == "" then createTrail = true end
+        elseif string_len( text ) <= width then
+            pre = text
+            current = current + string_len( text )
+        else
+            local lastSpace, lastSpaceEnd = string_find( section, "%s[%S]*$" )
+
+            pre = lastSpace and string_gsub( string_sub( text, 1, lastSpace - 1 ), "%s+$", "" ) or section
+            post = lastSpace and string_sub( text, lastSpace + 1 ) or string_sub( text, width + 1 )
+
+            local match = lastSpace and string_match( string_sub( text, 1, lastSpace - 1 ), "%s+$" )
+            current = current + string_len( pre ) + ( match and #match or 1 )
+        end
+
+        local offset = 0
+        if align == "centre" then
+            offset = math.floor( halfWidth - ( #pre / 2 ) + .5 )
+        elseif align == "right" then
+            offset = width - #pre + 1
+        end
+
+        lines[ #lines + 1 ], text = { pre, starting, current - 1, #lines + 1, offset < 1 and 1 or offset }, post
+
+        if createTrail then lines[ #lines + 1 ] = { "", current, current, #lines + 1, align == "centre" and halfWidth or ( align == "right" and width ) or 0 } end
+    end
+
+    self.lineConfig.lines = lines
+end
+
+--[[
+    @instance
+    @desc Uses 'wrapText' to generate the information required to draw the text to the canvas correctly.
+    @param <colour - bg>, <colour - tc>
+]]
+function MTextDisplay:drawText( bg, tc )
+    local lines = self.lineConfig.lines
+    if not lines then
+        self:wrapText()
+        lines = self.lineConfig.lines
+    end
+
+    local vPadding, hPadding = self.verticalPadding, self.horizontalPadding
+
+    local yOffset, xOffset = vPadding, hPadding
+    local vAlign, hAlign = self.verticalAlign, self.horizontalAlign
+    local width, height = self.width, self.height
+
+    if vAlign == "centre" then
+        yOffset = math.floor( ( height / 2 ) - ( #lines / 2 ) + .5 ) + vPadding
+    elseif vAlign == "bottom" then
+        yOffset = height - #lines - vPadding
+    end
+
+    local canvas, line = self.canvas
+    for i = 1, #lines do
+        local line, xOffset = lines[ i ], hPadding
+        local lineText = line[ 1 ]
+        if hAlign == "centre" then
+            xOffset = math.floor( width / 2 - ( #lineText / 2 ) + .5 )
+        elseif hAlign == "right" then
+            xOffset = width - #lineText - hPadding + 1
+        end
+
+        canvas:drawTextLine( xOffset + 1, i + yOffset, lineText, tc, bg )
+    end
+end
+
+function MTextDisplay:setText( text )
+    if text == self.text then return end
+
+    self.changed = true
+    self.text = text
+end
+
+configureConstructor {
+    argumentTypes = {
+        verticalPadding = "number",
+        horizontalPadding = "number",
+
+        verticalAlign = "string",
+        horizontalAlign = "string",
+
+        text = "string"
+    },
+
+    tmlContent = "text"
+}

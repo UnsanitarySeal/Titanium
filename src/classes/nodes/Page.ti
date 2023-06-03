@@ -1,0 +1,73 @@
+--[[
+    @instance position - number, nil (def. nil) - If set, the page will be at that position in the container (ie: 1 = first page, 3 = 3rd page).If not set, the page will fit in whereever it can, making space for pages that
+
+    The Page node is used by PageContainer nodes to hold content.
+
+    The width and height of the page is automatically defined when setting a parent on the page.
+]]
+
+class Page extends ScrollContainer
+
+--[[
+    @setter
+    @desc Sets the parent, and adjusts the width and height of the page to match that of the parent
+    @param <Node Instance - parent>
+]]
+function Page:setParent( parent )
+    if Titanium.typeOf( parent, "PageContainer", true ) then
+        parent:linkPage( self )
+    elseif parent then
+        return error("Page nodes can ONLY be children of PageContainers, or there subclasses.")
+    elseif self.parent then
+        self.parent:unlinkPage( self )
+    end
+
+    self.super:setParent( parent )
+end
+
+--[[
+    @instance
+    @desc Sets the X position of this page depending on it's position and the width of the parent.
+
+          This function is called by the parent PageContainer automatically
+]]
+function Page:updatePosition()
+    self.X = self.parent.width * ( self.position - 1 ) + 1
+end
+
+--[[
+    @setter
+    @desc Updates the position and sets 'isPositionTemporary' to nil
+    @param [number - position]
+]]
+function Page:setPosition( position )
+    self.position = position
+    self.isPositionTemporary = nil
+end
+
+--[[
+    @instance
+    @desc Returns the absolute position of the page, limited to 'limit'.
+    @param [Node Instance - limit]
+    @return <number - X>, <number - Y>
+]]
+function Page:getAbsolutePosition( limit )
+    local parent, application = self.parent, self.application
+    if parent then
+        if limit and parent == limit then
+            return -1 + parent.X + self.X - parent.scroll, -1 + parent.Y + self.Y
+        end
+
+        local pX, pY = self.parent:getAbsolutePosition()
+        return -1 + pX + self.X - parent.scroll - self.xScroll, -1 + pY + self.Y - self.yScroll
+    else return self.X, self.Y end
+end
+
+configureConstructor {
+    orderedArguments = { "id" },
+    argumentTypes = {
+        id = "string",
+        position = "number"
+    },
+    requiredArguments = { "id" }
+}

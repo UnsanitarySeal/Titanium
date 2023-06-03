@@ -1,0 +1,159 @@
+--[[
+    @static escapeChars - table (def. { ... }) - A table containing a special character -> escape character matrix (ie: n -> "\n")
+
+    @instance stream - string (def. false) - The current stream being lexed
+    @instance tokens - table (def. {}) - The tokens currently found by the lexer
+    @instance line - number (def. 1) - A number representing the line of the string currently being lexed
+    @instance char - number (def. 1) - A number representing the character of the current line being lexed
+]]
+
+abstract class Lexer {
+    static = {
+        escapeChars = {
+            a = "\a",
+            b = "\b",
+            f = "\f",
+            n = "\n",
+            r = "\r",
+            t = "\t",
+            v = "\v"
+        }
+    };
+
+    stream = false;
+
+    tokens = {};
+
+    line = 1;
+    char = 1;
+}
+
+--[[
+    @constructor
+    @desc Constructs the Lexer instance by providing the instance with a 'stream'.
+    @param <string - stream>, [boolean - manual]
+]]
+function Lexer:__init__( stream, manual )
+    if type( stream ) ~= "string" then
+        return error "Failed to initialise Lexer instance. Invalid stream paramater passed (expected string)"
+    end
+    self.stream = stream
+
+    if not manual then
+        self:formTokens()
+    end
+end
+
+--[[
+    @instance
+    @desc This function is used to repeatedly call 'tokenize' until the stream has been completely consumed.
+]]
+function Lexer:formTokens()
+    while self.stream and self.stream:find "%S" do
+        self:tokenize()
+    end
+end
+
+--[[
+    @instance
+    @desc A simple function that is used to add a token to the instances 'tokens' table.
+    @param <table - token>
+]]
+function Lexer:pushToken( token )
+    local tokens = self.tokens
+
+    token.char = self.char - ( token.value and #token.value or 1 )
+    token.line = self.line
+    tokens[ #tokens + 1 ] = token
+end
+
+--[[
+    @instance
+    @desc Consumes the stream by 'amount'.
+]]
+function Lexer:consume( amount )
+    local stream = self.stream
+    self.stream = stream:sub( amount + 1 )
+
+    self.char = self.char + amount
+    return content
+end
+
+--[[
+    @instance
+    @desc Uses the Lua pattern provided to select text from the stream that matches the pattern. The text is then consumed from the stream (entire pattern, not just selected text)
+    @param <string - pattern>, [number - offset]
+]]
+function Lexer:consumePattern( pattern, offset )
+    local cnt = self.stream:match( pattern )
+
+    self:consume( select( 2, self.stream:find( pattern ) ) + ( offset or 0 ) )
+    return cnt
+end
+
+--[[
+    @instance
+    @desc Searches for the next occurence of 'opener'. Once found all text between the first two occurences is selected and consumed resulting in a XML_STRING token.
+    @param <char - opener>
+    @return <string - consumedString>
+]]
+function Lexer:consumeString( opener )
+    local stream, closingIndex = self.stream
+
+    if stream:find( opener, 2 ) then
+        local str, c, escaped = {}
+        for i = 2, #stream do
+            c = stream:sub( i, i )
+
+            if escaped then
+                str[ #str + 1 ] = Lexer.escapeChars[ c ] or c
+                escaped = false
+            elseif c == "\\" then
+                escaped = true
+            elseif c == opener then
+                self:consume( i )
+                return table.concat( str )
+            else
+                str[ #str + 1 ] = c
+            end
+        end
+    end
+
+    self:throw( "Failed to lex stream. Expected string end ("..opener..")" )
+end
+
+--[[
+    @instance
+    @desc Removes all trailing spaces from
+]]
+function Lexer:trimStream()
+    local stream = self.stream
+
+    local newLn = stream:match("^(\n+)")
+    if newLn then self:newline( #newLn ) end
+
+    local spaces = select( 2, stream:find "^%s*%S" )
+
+    self.stream = stream:sub( spaces )
+    self.char = self.char + spaces - 1
+
+    return self.stream
+end
+
+--[[
+    @instance
+    @desc Advanced 'line' by 'amount' (or 1) and sets 'char' back to zero
+]]
+function Lexer:newline( amount )
+    self.line = self.line + ( amount or 1 )
+    self.char = 0
+end
+
+--[[
+    @instance
+    @desc Throws error 'e' prefixed with information regarding current position and stores the error in 'exception' for later reference
+]]
+function Lexer:throw( e )
+    self.exception = "Lexer (" .. tostring( self.__type ) .. ") Exception at line '"..self.line.."', char '"..self.char.."': "..e
+    return error( self.exception )
+end

@@ -1,0 +1,303 @@
+local tableInsert, tableRemove = table.insert, table.remove
+local function range( xBoundary, xDesired, width, canvasWidth )
+    local x1 = xBoundary > xDesired and 1 - xDesired or 1
+    local x2 = xDesired + width > canvasWidth and canvasWidth - xDesired or width
+
+    return x1, x2
+end
+
+--[[
+    @instance buffer - table (def. {}) - A one-dimensional table containing all the pixels inside the canvas. Pixel format: { char, fg, bg }
+    @instance last - table (def. {}) - A copy of buffer that is used to determine if the line has changed. If a pixel in the buffer doesn't match the same pixel in 'last', the line is redrawn
+    @instance width - number (def. 51) - The width of the canvas. Determines how many pixels pass before the next line starts
+    @instance height - number (def. 19) - The height of the canvas
+    @instance backgroundColour - colour, boolean, nil (def. 32768) - The background colour of the canvas. This is only used for pixels that do not have their own bg colour. If false/nil, the bg is left blank for the next parent to resolve. If '0', the background colour of the pixel under it is used (transparent)
+    @instance colour - colour, boolean, nil (def. 32768) - The foreground colour of the canvas. This is only used for pixels that do not have their own fg colour. If false/nil, the fg is left blank for the next parent to resolve. If '0', the colour of the pixel under it is used (transparent)
+    @instance backgroundTextColour - colour, nil (def. nil) - Only used when the pixels character is nil/false. If the pixel has no character, the character of the pixel under it is used (transparent). In this case, the foreground used to draw the pixel character is this property if set. If this property is not set, the foreground colour of the pixel under it is used instead
+    @instance backgroundChar - string, nil (def. nil) - The default character used for each pixel when the canvas is cleared and NOT transparent. If nil, no character is used (transparent)
+    @instance transparent - boolean, nil (def. nil) - When true, acts very similar to using backgroundChar 'nil' with the difference that the backgroundColour of cleared pixels is '0' (transparent)
+
+    The Canvas object is used by all components. It facilitates the drawing of pixels which are stored in its buffer.
+
+    The Canvas object is abstract. If you need a canvas for your object 'NodeCanvas' and 'TermCanvas' are provided with Titanium and may suite your needs.
+]]
+
+abstract class Canvas {
+    static = {
+        shaders = {};
+    };
+
+    buffer = {};
+    last = {};
+
+    width = 51;
+    height = 19;
+
+    backgroundColour = 32768;
+    colour = 1;
+
+    transparent = false;
+}
+
+--[[
+    @constructor
+    @desc Constructs the canvas instance and binds it with the owner supplied.
+    @param <ClassInstance - owner>
+]]
+function Canvas:__init__( owner )
+    self.raw.owner = Titanium.isInstance( owner ) and owner or error("Invalid argument for Canvas. Expected instance owner, got '"..tostring( owner ).."'")
+    self.raw.width = owner.raw.width
+    self.raw.height = owner.raw.height
+
+    self.raw.colour = owner.raw.colour
+    self.raw.backgroundChar = owner.raw.backgroundChar
+    if self.raw.backgroundChar == "nil" then
+        self.raw.backgroundChar = nil
+    end
+    self.raw.backgroundTextColour = owner.raw.backgroundTextColour
+    self.raw.backgroundColour = owner.raw.backgroundColour
+    self.raw.transparent = owner.raw.transparent
+
+    self:clear()
+end
+
+--[[
+    @instance
+    @desc Replaces the canvas with a blank one
+    @param [number - colour]
+]]
+function Canvas:clear( colour )
+    local pixel, buffer = { not self.transparent and self.backgroundChar, self.transparent and 0 or self.colour, self.transparent and 0 or colour or self.backgroundColour }, self.buffer
+
+    for index = 1, self.width * self.height do
+        buffer[ index ] = pixel
+    end
+end
+
+--[[
+    @instance
+    @desc Clears an area of the canvas defined by the arguments provided.
+    @param <number - areaX>, <number - areaY>, <number - areaWidth>, <number - areaHeight>, [number - colour]
+]]
+function Canvas:clearArea( aX, aY, aWidth, aHeight, colour )
+    local aY, aX, cWidth = aY > 0 and aY - 1 or 0, aX > 0 and aX - 1 or 0, self.width
+    local pixel, buffer = { not self.transparent and self.backgroundChar, self.colour, self.transparent and 0 or colour or self.backgroundColour }, self.buffer
+
+    local xBoundary, yBoundary = cWidth - aX, self.height
+    local effectiveWidth = xBoundary < aWidth and xBoundary or aWidth
+    for y = 0, -1 + ( aHeight < yBoundary and aHeight or yBoundary ) do
+        local pos = aX + ( y + aY ) * cWidth
+        for x = 1, effectiveWidth do
+            buffer[ pos + x ] = pixel
+        end
+    end
+end
+
+--[[
+    @setter
+    @desc Updates the transparency setting of the canvas and then clears the canvas to apply this setting
+    @param <number - colour>
+]]
+function Canvas:setTransparent( transparent )
+    self.transparent = transparent
+    self:clear()
+end
+
+--[[
+    @setter
+    @desc Updates the colour of the canvas and then clears the canvas
+    @param <number - colour>
+]]
+function Canvas:setColour( colour )
+    self.colour = colour
+    self:clear()
+end
+
+--[[
+    @setter
+    @desc Updates the background colour of the canvas and then clears the canvas
+    @param <number - backgroundColour>
+]]
+function Canvas:setBackgroundColour( backgroundColour )
+    self.backgroundColour = backgroundColour
+    self:clear()
+end
+
+--[[
+    @setter
+    @desc Updates the background character to be used when clearing the canvas. Clears the canvas to apply the change
+    @param <string/false/nil - char>
+]]
+function Canvas:setBackgroundChar( char )
+    self.backgroundChar = char
+    self:clear()
+end
+
+--[[
+    @setter
+    @desc Updates the canvas width, and then clears the canvas to apply the change
+]]
+function Canvas:setWidth( width )
+	local pixel = { not self.transparent and self.backgroundChar, self.colour, self.transparent and 0 or colour or self.backgroundColour }
+
+    local sWidth, sHeight, buffer = self.width, self.height, self.buffer
+    while width > sWidth do
+        -- If the width is greater than the current canvas width, add the extra pixels
+        for rowIndex = 1, sHeight do
+            -- Iterate over each row, adding a new pixel to the end of each (ie: width of the row + 1)
+            tableInsert( buffer, ( sWidth + 1 ) * rowIndex, pixel )
+        end
+
+        -- Update the width to account for the new pixels
+        sWidth = sWidth + 1
+    end
+
+    while width < sWidth do
+        -- Update the width to account for the removed pixels
+        sWidth = sWidth - 1
+
+        -- If the width is less than the current canvas width, remove the excess pixels
+        for rowIndex = 1, sHeight do
+            -- Remove the last pixel on this row
+            tableRemove( buffer, sWidth * rowIndex )
+        end
+    end
+
+    -- sWidth and width are equal now. Set the canvas width property to the width specified
+    self.width = width
+end
+
+--[[
+    @setter
+    @desc Updates the canvas height, and then clears the canvas to apply the change
+]]
+function Canvas:setHeight( height )
+	local pixel = { not self.transparent and self.backgroundChar, self.colour, self.transparent and 0 or colour or self.backgroundColour }
+
+    local sWidth, sHeight, buffer = self.width, self.height, self.buffer
+    while height > sHeight do
+        -- The new height is greater than the current height. Add the extra rows. No need for table.insert here as no pixels lie ahead
+        for i = 1, sWidth do
+            -- Add a new pixel to the end of the array for every pixel in a row (width)
+            buffer[ #buffer + 1 ] = pixel
+        end
+
+        sHeight = sHeight + 1
+    end
+
+    while height < sHeight do
+        -- The new width is less than the current height. Remove the excess rows
+        for i = 1, sWidth do
+            -- Remove the last pixel in the array for every pixel in a row (width)
+            buffer[ #buffer ] = nil
+        end
+
+        sHeight = sHeight - 1
+    end
+
+    -- sHeight and height are equal now. Set the canvas height property to the height specified
+    self.height = height
+end
+
+--[[
+    @instance
+    @desc Draws the canvas to the target 'canvas' using the X and Y offsets. Pixel character, foreground and background colours are resolved according to their property values.
+
+          If the canvas is to be shaded (shader argument), the shaderText and shaderBackground will be used to shade the foreground and background respectively. shaderText and
+          shaderBackground will default to 'shader' if they are not set. See canvas:getShaders for more information regarding how shaders are determined.
+
+          If the canvas 'onlyShadeBottom' property is set, only 'bottom' pixels (pixels behind this canvas) will be shaded, not foreground pixels (OverlayContainer uses this to shade
+          background and not foreground pixels)
+    @param <Canvas - canvas>, [number - offsetX], [number - offsetY], [string - shader], [string - shaderText], [string - shaderBackground]
+]]
+function Canvas:drawTo( canvas, offsetX, offsetY, shader, shaderText, shaderBackground )
+    local onlyShadeBottom = self.onlyShadeBottom
+    local bottomLayer = self.bottomLayer
+    local offsetX = offsetX - 1 or 0
+    local offsetY = offsetY - 1 or 0
+
+    local sRaw, tRaw = self.raw, canvas.raw
+    local width, height, buffer = sRaw.width, sRaw.height, sRaw.buffer
+    local tWidth, tHeight, tBuffer = tRaw.width, tRaw.height, tRaw.buffer
+
+    local colour, backgroundColour, backgroundTextColour = sRaw.colour, sRaw.backgroundColour, sRaw.backgroundTextColour
+    local xStart, xEnd = range( 1, offsetX, width, tWidth )
+
+    local shaderT, shaderB = self:getShaders( shader, shaderText, shaderBackground )
+    local function getShadedColour( colour, shader )
+        if shader then
+            return shader[ colour ]
+        end
+
+        return colour
+    end
+
+    local cache, tCache, top, tc, tf, tb, bot, bc, bf, bb, tPos = 0, offsetX + ( offsetY * tWidth )
+    for y = 1, height do
+        local cY = y + offsetY
+        if cY >= 1 and cY <= tHeight then
+            for x = xStart, xEnd do
+                top = buffer[ cache + x ]
+                tc, tf, tb, tPos = top[ 1 ], top[ 2 ], top[ 3 ], tCache + x
+                bot = tBuffer[ tPos ]
+                bc, bf, bb = bot[ 1 ], bot[ 2 ], bot[ 3 ]
+
+                if tc and ( tf and tf ~= 0 ) and ( tb and tb ~= 0 ) then
+                    tBuffer[ tPos ] = ( not shader or onlyShadeBottom ) and top or { tc, getShadedColour( tf, shaderT ), getShadedColour( tb, shaderB ) }
+                elseif not tc and tf == 0 and tb == 0 and bc and bf ~= 0 and bb ~= 0 then
+                    tBuffer[ tPos ] = shader and { bottomLayer or bc, getShadedColour( bf or colour or 32768, shaderT ), getShadedColour( bb or backgroundColour or 1, shaderB ) } or bot
+                else
+                    local nc, nf, nb = tc or bc, tf or colour, tb or backgroundColour
+
+                    if not tc then
+                        nf = backgroundTextColour or bf
+                    end
+
+                    if not shader or onlyShadeBottom then
+                        tBuffer[ tPos ] = { nc, nf == 0 and bf or nf, nb == 0 and bb or nb }
+                    else
+                        tBuffer[ tPos ] = { nc, getShadedColour( nf == 0 and bf or nf, shaderT ), getShadedColour( nb == 0 and bb or nb, shaderB ) }
+                    end
+                end
+            end
+        elseif cY > tHeight then
+            break
+        end
+
+        cache = cache + width
+        tCache = tCache + tWidth
+    end
+end
+
+--[[
+    @instance
+    @desc Accepts 1-3 properties are returns two shaders -- one for the foreground, and one for the background of the pixels.
+
+          For the foreground shader, the shader 'shadeText' will be returned if 'shadeText' is NOT boolean true (ie: an actual shader value [string]). If shadeText is 'true', the
+          value of 'shader' will be used to determine the shader. If 'shadeText' is false, no shader is returned for the foreground (false)
+
+          The same applies for shadeBackground.
+    @param [string - shader], [string | boolean - shadeText], [string | boolean - shadeBackground]
+    @return [table - foregroundShader], [table - backgroundShader]
+]]
+function Canvas:getShaders( shader, shadeText, shadeBackground )
+    local shaders = Canvas.static.shaders
+
+    return shadeText and shaders[ shadeText ~= true and shadeText or shader ] or false, shadeBackground and shaders[ shadeBackground ~= true and shadeBackground or shader ] or false
+end
+
+--[[
+    @static
+    @desc Registers the shader 'name' with the table 'lookup'. The 'lookup' argument should be a table containing a key entry for every CC colour, and a associatted value
+          dictating the shaded version of that colour (ie: 256 [key] -> 128 [value])
+    @param <string - name>, <table - lookup>
+]]
+function Canvas.static.registerShader( name, lookup )
+    if not ( type( name ) == "string" and type( lookup ) == "table" ) then
+        return error("Failed to register shader. Expected string, table; got " .. type( name ) .. ", " .. type( lookup ).."'")
+    elseif Canvas.static.shaders[ name ] then
+        return error("Failed to register shader '"..tostring( name ).."'. Shader already registered")
+    end
+
+    Canvas.static.shaders[ name ] = lookup
+end

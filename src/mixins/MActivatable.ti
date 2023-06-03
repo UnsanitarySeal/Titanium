@@ -1,0 +1,44 @@
+--[[
+    @instance active - boolean (def. false) - When a node is active, it uses active colours. A node should be activated before being focused.
+    @instance activeColour - colour (def. 1) - The foreground colour of the node used while the node is active
+    @instance activeBackgroundColour - colour (def. 512) - The background colour of the node used while the node is active
+
+    A mixin to reuse code commonly written when developing nodes that can be (de)activated.
+]]
+
+abstract class MActivatable {
+    active = false;
+
+    activeColour = colours.white;
+    activeBackgroundColour = colours.lightBlue;
+}
+
+--[[
+    @constructor
+    @desc Registers properties used by this class with the theme handler if the object mixes in 'MThemeable'
+]]
+function MActivatable:MActivatable()
+    if Titanium.mixesIn( self, "MThemeable" ) then
+        self:register( "active", "activeColour", "activeBackgroundColour" )
+    end
+end
+
+--[[
+    @instance
+    @desc Sets the 'active' property to the 'active' argument passed. When the 'active' property changes the node will become 'changed'.
+    @param <boolean - active>
+]]
+function MActivatable:setActive( active )
+    local raw = self.raw
+    if raw.active == active then return end
+
+    raw.active = active
+    self:queueAreaReset()
+end
+
+configureConstructor {
+    argumentTypes = { active = "boolean", activeColour = "colour", activeBackgroundColour = "colour" }
+} alias {
+    activeColor = "activeColour",
+    activeBackgroundColor = "activeBackgroundColour"
+}
